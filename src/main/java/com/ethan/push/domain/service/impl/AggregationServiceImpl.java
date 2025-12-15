@@ -98,6 +98,7 @@ public class AggregationServiceImpl implements AggregationService {
     public TaskInfo getAggregatedData(TaskInfo triggerTaskInfo) {
         // 1. 解析 Trigger 信息
         // String businessId = triggerTaskInfo.getBusinessId(); // 聚合不再依赖 businessId
+        String receiver = triggerTaskInfo.getReceiver().iterator().next(); // 获取接收者
         String originalTemplateId = triggerTaskInfo.getParams().get("originalTemplateId");
         String batchId = triggerTaskInfo.getParams().get("batchId"); // 获取批次ID
 
