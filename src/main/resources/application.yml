@@ -1,0 +1,102 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: push-server
+
+  # ✅ 修正：datasource 必须属于 spring 层级
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://127.0.0.1:3306/push_db?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false
+    username: root
+    password: "1234"
+
+  # ✅ 修正：data (Redis) 必须属于 spring 层级
+  data:
+    redis:
+      host: 192.168.100.129
+      port: 6379
+      database: 0
+      lettuce:
+        pool:
+          max-active: 10
+          max-idle: 10
+          min-idle: 1
+          time-between-eviction-runs: 10s
+
+# knife4j 独立出来
+knife4j:
+  enable: true
+
+# RocketMQ 配置 (通常在根节点，取决于你的 starter 版本)
+rocketmq:
+  name-server: 192.168.100.129:9876
+  producer:
+    group: push-group
+    send-message-timeout: 3000
+  topic:
+    push: push-topic-marketing      # 默认/营销 Topic
+    push-urgent: push-topic-urgent  # 紧急/验证码 Topic
+    push-notice: push-topic-notice  # 通知/服务 Topic
+
+# ⚠️ 额外注意：Nacos 配置位置
+# 如果你用的是 Spring Cloud Alibaba，Nacos 通常也应该在 spring.cloud.nacos 下
+# 除非你用的特定库要求放在根目录。如果是标准用法，下面这样可能也是错的，建议检查。
+nacos:
+  config:
+    server-addr: 192.168.100.129:8848
+    namespace: public
+
+# DynamicTp 配置
+dynamictp:
+  enabled: true
+  connector: nacos
+  nacos:
+    data-id: push-tp-config
+    group: DEFAULT_GROUP
+  monitor:
+    enabled: true
+    collector-types: logging
+    interval: 5
+  # 线程池配置
+  executors:
+    # 1. 验证码专用线程池 (高优，快速响应)
+    - thread-pool-name: dtp-code-executor
+      core-pool-size: 20
+      max-pool-size: 50
+      queue-capacity: 500
+      queue-type: VariableLinkedBlockingQueue
+      rejected-handler-type: CallerRunsPolicy
+      thread-name-prefix: dtp-code-
+      notify-items:
+        - type: liveness
+          enabled: true
+          threshold: 80
+
+    # 2. 通知类专用线程池 (中优，标准配置 -> 升级为抗压配置)
+    - thread-pool-name: dtp-notice-executor
+      core-pool-size: 20
+      max-pool-size: 100
+      queue-capacity: 5000
+      queue-type: VariableLinkedBlockingQueue
+      rejected-handler-type: CallerRunsPolicy
+      thread-name-prefix: dtp-notice-
+
+    # 3. 营销类专用线程池 (低优，大队列削峰)
+    - thread-pool-name: dtp-marketing-executor
+      core-pool-size: 5
+      max-pool-size: 10
+      queue-capacity: 10000 # 允许大量堆积
+      queue-type: VariableLinkedBlockingQueue
+      rejected-handler-type: CallerRunsPolicy # 反压模式：由消费线程执行，减缓拉取速度
+      thread-name-prefix: dtp-marketing-
+
+# MyBatis Plus
+mybatis-plus:
+  type-aliases-package: com.ethan.push.common.domain
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      id-type: auto
