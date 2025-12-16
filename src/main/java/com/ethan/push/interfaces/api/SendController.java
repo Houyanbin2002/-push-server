@@ -37,12 +37,13 @@ public class SendController {
     private RRateLimiter globalRateLimiter;
 
 
-    // 启动时初始化全局限流器 (假设已在某个 @PostConstruct 中初始化，这里仅作演示)
-    // 假设在 FlowControlConfig.java 中初始化，限制 5000 QPS
-    // @PostConstruct
+    // 启动时初始化全局限流器
+    @jakarta.annotation.PostConstruct
     public void initGlobalLimiter() {
         globalRateLimiter = redissonClient.getRateLimiter(GLOBAL_LIMITER_KEY);
-        // 设置速率，这里假设初始化了，实际部署中确保配置
+        // 初始化令牌桶规则：每秒 5000 个令牌 (如果未设置过)
+        // RateType.OVERALL 表示所有客户端共享限制
+        globalRateLimiter.trySetRate(org.redisson.api.RateType.OVERALL, 5000, 1, org.redisson.api.RateIntervalUnit.SECONDS);
     }
 
 
