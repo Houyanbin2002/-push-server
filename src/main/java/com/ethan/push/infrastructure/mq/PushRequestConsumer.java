@@ -20,16 +20,16 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 @Component
 @RocketMQMessageListener(
-        topic = "${rocketmq.topic.push}",
-        consumerGroup = "${rocketmq.producer.group}"
+        topic = "${rocketmq.topic.push-trigger}",
+        consumerGroup = "${rocketmq.producer.group}-trigger"
 )
 public class PushRequestConsumer implements RocketMQListener<MessageExt> {
 
     @Resource
     private SendService sendService;
     
-    @Resource(name = "dtpCodeExecutor") // 注入你为核心业务配置的线程池
-    private DtpExecutor dtpCodeExecutor; 
+    @Resource(name = "dtpMarketingExecutor") // 修正：营销消息处理应该使用营销线程池，而不是抢占验证码的线程池
+    private DtpExecutor dtpMarketingExecutor; 
     
     @Resource
     private StringRedisTemplate stringRedisTemplate;
@@ -53,7 +53,7 @@ public class PushRequestConsumer implements RocketMQListener<MessageExt> {
 
         // 3. 线程池隔离执行任务 (核心！释放 MQ 线程，防止阻塞拉取)
         // 使用动态线程池来执行业务逻辑，实现渠道隔离
-        dtpCodeExecutor.execute(() -> {
+        dtpMarketingExecutor.execute(() -> {
             try {
                 // sendService.send() 现在只包含责任链的业务逻辑
                 sendService.send(sendRequest); 

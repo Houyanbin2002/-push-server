@@ -36,6 +36,7 @@ rocketmq:
     group: push-group
     send-message-timeout: 3000
   topic:
+    push-trigger: push-topic-trigger  # 新增：入口缓冲 Topic (用于营销消息削峰)
     push: push-topic-marketing      # 默认/营销 Topic
     push-urgent: push-topic-urgent  # 紧急/验证码 Topic
     push-notice: push-topic-notice  # 通知/服务 Topic

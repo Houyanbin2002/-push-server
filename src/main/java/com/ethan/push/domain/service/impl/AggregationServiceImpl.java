@@ -43,8 +43,9 @@ public class AggregationServiceImpl implements AggregationService {
 
     @Override
     public boolean needAggregation(TaskInfo taskInfo) {
-        // 简单策略：只有带有 businessId 的消息才聚合
-        return StrUtil.isNotBlank(taskInfo.getBusinessId());
+        // 策略：只有通知类消息(10)才需要聚合，营销消息(20)和验证码(30)不需要
+        // 验证码本身走 Urgent 通道，可能根本不会经过这里，但加个判断更保险
+        return MessageType.NOTICE.getCode().equals(taskInfo.getMsgType());
     }
 
     @Override
@@ -53,12 +54,17 @@ public class AggregationServiceImpl implements AggregationService {
         long expire = 30; // 聚合窗口 30秒
         long batchId = System.currentTimeMillis() / (expire * 1000); // 生成批次ID
 
+        // 获取分组Key (例如 videoId, postId)，实现不同对象的独立聚合
+        Map<String, String> taskParams = taskInfo.getParams();
+        String groupingKey = (taskParams != null && taskParams.containsKey("groupingKey")) ? taskParams.get("groupingKey") : "default";
+
         for (String receiver : receivers) {
-            // Key 增加 batchId 后缀，解决并发冲突问题
-            // 修改：聚合 Key 去掉 businessId，改用 MessageTemplateId，确保同类消息能聚合
-            String key = "agg:data:" + receiver + ":" + taskInfo.getMessageTemplateId() + ":" + batchId;
-            String flagKey = "agg:flag:" + receiver + ":" + taskInfo.getMessageTemplateId() + ":" + batchId;
-            String counterKey = "agg:count:" + receiver + ":" + taskInfo.getMessageTemplateId() + ":" + batchId;
+            // Key 结构: agg:data:{receiver}:{templateId}:{groupingKey}:{batchId}
+            String keySuffix = receiver + ":" + taskInfo.getMessageTemplateId() + ":" + groupingKey + ":" + batchId;
+            
+            String key = "agg:data:" + keySuffix;
+            String flagKey = "agg:flag:" + keySuffix;
+            String counterKey = "agg:count:" + keySuffix;
 
             try {
                 Long result = redisTemplate.execute(redisScript, Arrays.asList(key, flagKey, counterKey),
@@ -71,17 +77,18 @@ public class AggregationServiceImpl implements AggregationService {
                     trigger.setMsgType(MessageType.AGGREGATION.getCode()); // 设置为聚合类型
                     trigger.setReceiver(Collections.singleton(receiver)); // Trigger 针对单个接收者
                     
-                    // 将原始 MsgType 和 BatchId 放入 params，以便后续恢复
+                    // 将原始 MsgType, BatchId, GroupingKey 放入 params，以便后续恢复
                     Map<String, String> params = new HashMap<>();
                     params.put("originalMsgType", String.valueOf(taskInfo.getMsgType()));
                     params.put("originalTemplateId", String.valueOf(taskInfo.getMessageTemplateId())); // 记录 TemplateId
                     params.put("batchId", String.valueOf(batchId)); // 传递批次ID
+                    params.put("groupingKey", groupingKey); // 传递分组Key
                     trigger.setParams(params);
 
                     // 发送延迟消息 (Level 4 = 30s)
                     try {
                         rocketMQTemplate.syncSend(topic, MessageBuilder.withPayload(JSON.toJSONString(trigger)).build(), 2000, 4);
-                        log.info("发送聚合Trigger消息: receiver={}, bizId={}, batchId={}", receiver, taskInfo.getBusinessId(), batchId);
+                        log.info("发送聚合Trigger消息: receiver={}, groupingKey={}, batchId={}", receiver, groupingKey, batchId);
                     } catch (Exception e) {
                         // MQ 发送失败，必须回滚 Redis Flag，否则这批消息将永远无法被触发
                         log.error("发送聚合Trigger失败，回滚Flag: {}", flagKey, e);
@@ -99,12 +106,15 @@ public class AggregationServiceImpl implements AggregationService {
         // 1. 解析 Trigger 信息
         // String businessId = triggerTaskInfo.getBusinessId(); // 聚合不再依赖 businessId
         String receiver = triggerTaskInfo.getReceiver().iterator().next(); // 获取接收者
-        String originalTemplateId = triggerTaskInfo.getParams().get("originalTemplateId");
-        String batchId = triggerTaskInfo.getParams().get("batchId"); // 获取批次ID
+        Map<String, String> params = triggerTaskInfo.getParams();
+        String originalTemplateId = params.get("originalTemplateId");
+        String batchId = params.get("batchId"); // 获取批次ID
+        String groupingKey = params.get("groupingKey"); // 获取分组ID
 
-        // Key 增加 batchId 后缀
-        String key = "agg:data:" + receiver + ":" + originalTemplateId + ":" + batchId;
-        String counterKey = "agg:count:" + receiver + ":" + originalTemplateId + ":" + batchId;
+        // Key 增加 batchId 和 groupingKey 后缀
+        String keySuffix = receiver + ":" + originalTemplateId + ":" + groupingKey + ":" + batchId;
+        String key = "agg:data:" + keySuffix;
+        String counterKey = "agg:count:" + keySuffix;
 
         // 2. 从 Redis 获取数据 (限制最大条数，防止 OOM)
         // 真实业务场景优化：只取前 100 条，避免 20万条数据一次性拉取把内存撑爆
@@ -148,12 +158,15 @@ public class AggregationServiceImpl implements AggregationService {
     @Override
     public void clear(TaskInfo triggerTaskInfo) {
         String receiver = triggerTaskInfo.getReceiver().iterator().next();
-        String originalTemplateId = triggerTaskInfo.getParams().get("originalTemplateId");
-        String batchId = triggerTaskInfo.getParams().get("batchId"); // 获取批次ID
+        Map<String, String> params = triggerTaskInfo.getParams();
+        String originalTemplateId = params.get("originalTemplateId");
+        String batchId = params.get("batchId"); // 获取批次ID
+        String groupingKey = params.get("groupingKey"); // 获取分组ID
 
-        String key = "agg:data:" + receiver + ":" + originalTemplateId + ":" + batchId;
-        String flagKey = "agg:flag:" + receiver + ":" + originalTemplateId + ":" + batchId;
-        String counterKey = "agg:count:" + receiver + ":" + originalTemplateId + ":" + batchId;
+        String keySuffix = receiver + ":" + originalTemplateId + ":" + groupingKey + ":" + batchId;
+        String key = "agg:data:" + keySuffix;
+        String flagKey = "agg:flag:" + keySuffix;
+        String counterKey = "agg:count:" + keySuffix;
 
         redisTemplate.delete(Arrays.asList(key, flagKey, counterKey));
     }

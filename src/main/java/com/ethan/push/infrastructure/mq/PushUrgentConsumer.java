@@ -4,12 +4,14 @@ import com.alibaba.fastjson.JSON;
 import com.ethan.push.domain.model.TaskInfo;
 import com.ethan.push.infrastructure.channel.HandlerHolder;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.spring.annotation.RocketMQMessageListener;
 import org.apache.rocketmq.spring.core.RocketMQListener;
 import org.dromara.dynamictp.core.DtpRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executor;
 
 /**
@@ -19,16 +21,17 @@ import java.util.concurrent.Executor;
 @Slf4j
 @Component
 @RocketMQMessageListener(topic = "${rocketmq.topic.push-urgent}", consumerGroup = "${rocketmq.producer.group}-urgent")
-public class PushUrgentConsumer implements RocketMQListener<String> {
+public class PushUrgentConsumer implements RocketMQListener<MessageExt> {
 
     @Autowired
     private HandlerHolder handlerHolder;
 
-    private static final String DTP_CODE_EXECUTOR = "dtp-code-executor";
+    private static final String DTP_CODE_EXECUTOR = "dtpCodeExecutor";
 
     @Override
-    public void onMessage(String message) {
-        TaskInfo taskInfo = JSON.parseObject(message, TaskInfo.class);
+    public void onMessage(MessageExt message) {
+        String body = new String(message.getBody(), StandardCharsets.UTF_8);
+        TaskInfo taskInfo = JSON.parseObject(body, TaskInfo.class);
         if (taskInfo == null) {
             return;
         }

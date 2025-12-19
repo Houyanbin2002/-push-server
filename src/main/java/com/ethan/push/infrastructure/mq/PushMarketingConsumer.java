@@ -11,10 +11,13 @@ import org.apache.rocketmq.spring.annotation.RocketMQMessageListener;
 import org.apache.rocketmq.spring.core.RocketMQListener;
 import org.dromara.dynamictp.core.DtpRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.messaging.Message;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
+import org.apache.rocketmq.common.message.MessageExt;
 
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 消费营销类 MQ 消息 (广告、推广、聚合消息)
@@ -23,23 +26,35 @@ import java.util.concurrent.Executor;
 @Slf4j
 @Component
 @RocketMQMessageListener(topic = "${rocketmq.topic.push}", consumerGroup = "${rocketmq.producer.group}")
-public class PushMarketingConsumer implements RocketMQListener<Message> {
+public class PushMarketingConsumer implements RocketMQListener<MessageExt> {
 
     @Autowired
     private HandlerHolder handlerHolder;
     @Autowired
     private AggregationService aggregationService;
+    @Autowired
+    private StringRedisTemplate stringRedisTemplate;
 
-    private static final String DTP_MARKETING_EXECUTOR = "dtp-marketing-executor";
+    private static final String DTP_MARKETING_EXECUTOR = "dtpMarketingExecutor";
 
     @Override
-    public void onMessage(Message message) {
-        // 1. 从 Header 中提取 TraceId 并放入 MDC
-        String traceId = (String) message.getHeaders().get(TraceIdUtils.TRACE_ID);
+    public void onMessage(MessageExt message) {
+        // 1. 从 Header 中提取 TraceId 并放入 MDC (RocketMQ 原生属性)
+        String traceId = message.getUserProperty(TraceIdUtils.TRACE_ID);
         TraceIdUtils.setTraceId(traceId);
 
+        // 2. 幂等性校验
+        String msgId = message.getMsgId();
+        if (msgId != null) {
+            String idempotentKey = "push:idempotent:" + msgId;
+            if (Boolean.FALSE.equals(stringRedisTemplate.opsForValue().setIfAbsent(idempotentKey, "1", 5, TimeUnit.MINUTES))) {
+                log.warn("重复消息，幂等性校验失败，直接丢弃: MsgId={}", msgId);
+                return;
+            }
+        }
+
         try {
-            String body = (String) message.getPayload();
+            String body = new String(message.getBody(), StandardCharsets.UTF_8);
             TaskInfo taskInfo = JSON.parseObject(body, TaskInfo.class);
             if (taskInfo == null || taskInfo.getMsgType() == null) {
                 return;
@@ -58,38 +73,23 @@ public class PushMarketingConsumer implements RocketMQListener<Message> {
                 }
             }
 
-            // 策略分流
-            // 1. 聚合消息：同步处理 (保证可靠性，利用 MQ 重试机制)
-            if (isAggregation) {
-                try {
-                    // 直接调用 Handler 发送 (阻塞直到完成)
-                    boolean success = handlerHolder.route(taskInfo.getSendChannel()).send(taskInfo);
-                    if (success) {
-                        // 发送成功，ACK 清理 Redis
-                        aggregationService.clear(triggerTaskInfo);
-                    } else {
-                        // 发送失败，抛出异常 MQ 重试
-                        throw new RuntimeException("Aggregated message send failed");
-                    }
-                } catch (Exception e) {
-                    log.error("Aggregated message send failed, waiting for retry. bizId:{}", taskInfo.getBusinessId(), e);
-                    throw e; // 抛出异常，触发 MQ 重试
-                }
-                return; // 结束
-            }
-
-            // 2. 普通营销消息：异步处理 (追求吞吐量，允许 CallerRuns 反压)
+            // 3. 线程池隔离执行任务
+            final TaskInfo finalTaskInfo = taskInfo;
             Executor executor = DtpRegistry.getExecutor(DTP_MARKETING_EXECUTOR);
-            TaskInfo finalTaskInfo = taskInfo;
             
             // 捕获当前线程 TraceId，传递给子线程
             String currentTraceId = TraceIdUtils.getTraceId();
-            
+
             executor.execute(() -> {
                 // 子线程设置 TraceId
                 TraceIdUtils.setTraceId(currentTraceId);
                 try {
                     handlerHolder.route(finalTaskInfo.getSendChannel()).send(finalTaskInfo);
+                    
+                    // 如果是聚合消息，发送成功后需要清理 Redis
+                    if (isAggregation) {
+                        aggregationService.clear(triggerTaskInfo);
+                    }
                 } catch (Exception e) {
                     log.error("Marketing Task execution failed. TaskInfo: {}", JSON.toJSONString(finalTaskInfo), e);
                 } finally {

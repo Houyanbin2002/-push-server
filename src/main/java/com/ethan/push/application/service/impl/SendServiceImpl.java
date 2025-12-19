@@ -42,9 +42,10 @@ public class SendServiceImpl implements SendService {
             taskInfoList.add(taskInfo);
         }
 
-        // 3. 骞惰鎻愪氦 Pipeline 澶勭悊
-        // 使用 parallelStream 实现简单的并行处理，提高吞吐量
-        taskInfoList.parallelStream().forEach(taskInfo -> {
+        // 3. 提交 Pipeline 处理
+        // 修复：移除 parallelStream，避免占用 JVM 公共线程池导致雪崩
+        // 这里的处理逻辑很快（只是组装 Context），不需要并行
+        for (TaskInfo taskInfo : taskInfoList) {
             ProcessContext context = ProcessContext.builder()
                     .code("send")
                     .taskInfo(taskInfo)
@@ -57,7 +58,7 @@ public class SendServiceImpl implements SendService {
             } catch (Exception e) {
                 log.error("Pipeline process failed. businessId:{}", taskInfo.getBusinessId(), e);
             }
-        });
+        }
 
         return BasicResult.success();
     }
